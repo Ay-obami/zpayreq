@@ -1,0 +1,41 @@
+name: Payment request builder CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  payment-request-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: All validation branches and happy path
+        run: python3 -m unittest discover -s tests -v
+      - name: CLI smoke test (happy path)
+        run: |
+          ./zpayreq t1goiSyw2JinFCmUnfiwwp72LEZzD42TyYu 1.25000000 | grep -Fx 'zcash:t1goiSyw2JinFCmUnfiwwp72LEZzD42TyYu?amount=1.25'
+      - name: CLI smoke test (shielded enforcement)
+        run: |
+          if ./zpayreq t1goiSyw2JinFCmUnfiwwp72LEZzD42TyYu 1 --require-shielded >/tmp/stdout 2>/tmp/stderr; then
+            echo 'Expected shielded requirement error' >&2
+            exit 1
+          fi
+          test ! -s /tmp/stdout
+          grep -q '^SHIELDED_REQUIRED:' /tmp/stderr
+      - name: CLI smoke test (precision and zero)
+        run: |
+          for bad in 0 0.000000001 NaN -1; do
+            if ./zpayreq t1goiSyw2JinFCmUnfiwwp72LEZzD42TyYu "$bad" >/tmp/stdout 2>/tmp/stderr; then
+              echo "Invalid amount $bad unexpectedly accepted" >&2
+              exit 1
+            fi
+            test ! -s /tmp/stdout
+          done

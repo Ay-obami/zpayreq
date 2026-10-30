@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+"""Build a single-recipient ZIP-321 Zcash payment request URI."""
+import argparse
+from decimal import Decimal, InvalidOperation
+import re
+import sys
+
+from zaddrcheck_core import classify
+
+
+class PaymentError(Exception):
+    def __init__(self, code: str, message: str, exit_status: int):
+        super().__init__(message)
+        self.code = code
+        self.exit_status = exit_status
+
+
+def validate_amount(text: str) -> str:
+    """Return a canonical ZEC decimal without rounding or scientific notation."""
+    if not isinstance(text, str):
+        raise PaymentError("INVALID_AMOUNT", "Amount must be a decimal ZEC string.", 20)
+    # Recognize negative numeric amounts separately from malformed syntax.
+    if re.fullmatch(r"-[0-9]+(?:\.[0-9]+)?", text, re.ASCII):
+        raise PaymentError("NON_POSITIVE_AMOUNT", "Amount must be greater than zero.", 21)
+    if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", text, re.ASCII):
+        raise PaymentError("INVALID_AMOUNT", "Expected decimal ZEC without spaces, signs, exponent, or separators.", 20)
+    fraction = text.partition(".")[2]
+    if len(fraction) > 8:
+        raise PaymentError("INVALID_PRECISION", "Amount cannot exceed 8 decimal places (1 zatoshi).", 22)
+    try:
+        amount = Decimal(text)
+    except InvalidOperation as exc:
+        raise PaymentError("INVALID_AMOUNT", "Invalid decimal amount.", 20) from exc
+    if amount <= 0:
+        raise PaymentError("NON_POSITIVE_AMOUNT", "Amount must be greater than zero.", 21)
+    if amount > 21000000:
+        raise PaymentError("AMOUNT_TOO_LARGE", "Amount exceeds maximum supply of 21,000,000 ZEC.", 23)
+    # Avoid scientific notation and remove irrelevant leading/trailing zeroes.
+    normalized = format(amount, "f")
+    if "." in normalized:
+        normalized = normalized.rstrip("0").rstrip(".")
+    normalized = normalized.lstrip("0") if normalized[0] == "0" else normalized
+    if normalized.startswith("."):
+        normalized = "0" + normalized
+    return normalized or "0"
+
+
+def build_uri(address: str, amount_text: str, require_shielded: bool = False) -> str:
+    result = classify(address)
+    if not result["valid"]:
+        raise PaymentError("INVALID_ADDRESS", "Address failed Zcash encoding or checksum validation.", 10)
+    if require_shielded and result["type"] == "transparent":
+        raise PaymentError("SHIELDED_REQUIRED", "Transparent-only addresses cannot satisfy the shielded requirement.", 11)
+    amount = validate_amount(amount_text)
+    return f"zcash:{address}?amount={amount}"
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="zpayreq",
+        description="Generate a ZIP-321 Zcash payment request URI. Does not send funds.",
+    )
+    parser.add_argument("address", help="Valid transparent, Sapling, or Unified address")
+    parser.add_argument("amount", help="Positive ZEC amount, up to eight fractional digits")
+    parser.add_argument("--require-shielded", "--shielded-required", "--shielded-only",
+                        dest="require_shielded", action="store_true",
+                        help="Reject transparent-only destinations")
+
+    # Parse options manually so even malformed amount strings beginning '--'
+    # are classified as INVALID_AMOUNT, not swallowed as unknown CLI flags.
+    tokens = list(sys.argv[1:] if argv is None else argv)
+    if any(t in ("-h", "--help") for t in tokens):
+        parser.print_help()
+        return 0
+    flags = {"--require-shielded", "--shielded-required", "--shielded-only"}
+    require_shielded = any(t in flags for t in tokens)
+    positionals = [t for t in tokens if t not in flags]
+    if len(positionals) != 2:
+        print("USAGE_ERROR: expected zpayreq <address> <amount> [--require-shielded]", file=sys.stderr)
+        return 2
+    try:
+        print(build_uri(positionals[0], positionals[1], require_shielded))
+    except PaymentError as exc:
+        print(f"{exc.code}: {exc}", file=sys.stderr)
+        return exc.exit_status
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
